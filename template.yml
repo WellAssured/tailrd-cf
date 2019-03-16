@@ -1,0 +1,422 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template for the TailRD App Infrastructure"
+Metadata: 
+  UserPool: 
+    Description: "TailRD UserPool. Outputs UserPoolId and ARN"
+Parameters:  # Currently used for namespacing Resources to a specific deployment environment. E.g. - "PROD-TailRD"
+  APIName:
+    Type: String
+    Description: Name of the API - used to generate unique names for resources
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9_-]*$'
+Resources: 
+  # TailRDUserPool: 
+  #   Type: "AWS::Cognito::UserPool"
+  #   Properties:
+  #     UserPoolName: TailRDUserPool-CF
+  #     AutoVerifiedAttributes:
+  #       - email
+  #     EmailConfiguration: 
+  #       ReplyToEmailAddress: "jack@tailrdnutrition.com"
+  #       SourceArn: "arn:aws:ses:us-east-1:269838891672:identity/jack@tailrdnutrition.com"
+  #     EmailVerificationMessage: "<h3>Welcome to TailRD Nutrition!</h3><p>Here's your Confirmation Code:  {####}</p><p>Have a question? Just reply to this email.</br></br>- Jack </p>"
+  #     EmailVerificationSubject: "TailRD Nutrition - Email Confirmation Code"
+  #     LambdaConfig: 
+  #       PostConfirmation: "arn:aws:lambda:us-east-1:269838891672:function:cognito-newuser"
+  #     Schema:
+  #       - Name: email
+  #         AttributeDataType: String
+  #         Mutable: false
+  #         Required: true
+  #       - Name: zip
+  #         AttributeDataType: String
+  #         Mutable: true
+  #         StringAttributeConstraints: 
+  #           MinLength: "1"
+  #           MaxLength: "10"
+  #       - Name: promo
+  #         AttributeDataType: String
+  #         Mutable: true
+  #         StringAttributeConstraints: 
+  #           MinLength: "0"
+  #           MaxLength: "64"
+
+  TailRDUserPoolClient: 
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties: 
+      ClientName: !Sub ${APIName}-Cognito_Client
+      ReadAttributes:
+        - "email"
+        - "custom:promo"
+        - "custom:zip"
+      UserPoolId: "us-east-1_B7s7R0tOg" # !Ref TailRDUserPool
+      WriteAttributes:
+        - "email"
+        - "custom:promo"
+        - "custom:zip"
+
+  TailRDAppSyncApi: 
+    Type: "AWS::AppSync::GraphQLApi"
+    Properties:
+      Name: !Sub ${APIName}-AppSync-CF
+      AuthenticationType: "AMAZON_COGNITO_USER_POOLS"
+      UserPoolConfig: 
+        UserPoolId: "us-east-1_B7s7R0tOg" # !Ref TailRDUserPool
+        AwsRegion: !Sub ${AWS::Region}
+        DefaultAction: "ALLOW"
+
+  TailRDAppSyncSchema:
+    Type: "AWS::AppSync::GraphQLSchema"
+    Properties:
+      ApiId:  !GetAtt TailRDAppSyncApi.ApiId
+      Definition: |
+        type Conversation {
+          conversationId: ID
+          info: ConversationDetails
+          messages: MessageConnection
+        }
+        type ConversationConnection {
+          items: [Conversation]
+          nextToken: String
+        }
+        type ConversationDetails {
+          conversationId: ID
+          createdBy: ID
+          createdTime: String
+          lastActiveTime: String
+          lastMessageSummary: String
+          participants: [Participant!]
+        }
+        input CreateConversationInput {
+          participants: [ID!]!
+        }
+        input CreateMessageInput {
+          conversationId: ID!
+          content: String
+        }
+        type Message {
+          conversationId: ID!
+          sender: ID!
+          timestamp: String
+          content: String
+        }
+        type MessageConnection {
+          items: [Message]
+          nextToken: String
+        }
+        type Mutation {
+          createConversation(input: CreateConversationInput!): Conversation
+          addParticipant(input: UpdateParticipantInput!): Conversation
+          removeParticipant(input: UpdateParticipantInput!): Conversation
+          sendMessage(input: CreateMessageInput!): Message
+        }
+        type Participant {
+          cognitoId: ID!
+          username: String
+        }
+        type Query {
+          getUser: User
+        }
+        type Subscription {
+          newMessage(conversationId: ID!): Message
+            @aws_subscribe(mutations: ["sendMessage"])
+        }
+        input UpdateParticipantInput {
+          conversationId: ID!
+          participant: ID!
+        }
+        type User {
+          cognitoId: ID!
+          username: String
+          conversations: ConversationConnection
+          isDietitian: Boolean
+        }
+
+  TailRDAppSyncDataSourceNone:
+    Type: "AWS::AppSync::DataSource"
+    Properties:
+      Name: Cognito_LocalResolver
+      Type: NONE
+      Description: "Local Resolver to be used for Cognito context variables."
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+
+  TailRDAppSyncDataSourceMessageTable:
+    Type: "AWS::AppSync::DataSource"
+    Properties:
+      Name: MessageTable
+      Type: AMAZON_DYNAMODB
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      Description: "AppSync Data Source for the Message Table in DynamoDB."
+      ServiceRoleArn: "arn:aws:iam::269838891672:role/service-role/appsync-datasource-ddb-tt366k-TailRD_Message"
+      DynamoDBConfig:
+        TableName: TailRD_Message
+        AwsRegion: !Sub ${AWS::Region}
+
+  TailRDAppSyncDataSourceListUsersLambda:
+    Type: "AWS::AppSync::DataSource"
+    Properties:
+      Name: appsync_Cognito_ListUsers
+      Type: AWS_LAMBDA
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      Description: "AppSync Data Source for the List Cognito Users Lambda Function."
+      ServiceRoleArn: "arn:aws:iam::269838891672:role/service-role/appsync-datasource-lam-tt366k-appsync-logger"
+      LambdaConfig:
+        LambdaFunctionArn: "arn:aws:lambda:us-east-1:269838891672:function:appsync-getParticipants-Cognito"
+
+  TailRDAppSyncResolverConversationInfo:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: info
+      TypeName: Conversation
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "conversationId": $util.dynamodb.toDynamoDBJson($ctx.source.conversationId),
+            "id": $util.dynamodb.toDynamoDBJson("convoInfo")}
+          }
+        }
+      ResponseMappingTemplate: $util.toJson($ctx.result)
+
+  TailRDAppSyncResolverConversationMessages:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: messages
+      TypeName: Conversation
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Query",
+          "query" : {
+              "expression": "conversationId = :id AND begins_with(id, :messagePrefix)",
+              "expressionValues" : {
+                  ":id" : {
+                      "S" : "${ctx.source.conversationId}"
+                  },
+                  ":messagePrefix" : {
+                    "S" : "msg-"
+                  }
+              }    
+          },
+          "scanIndexForward": false,
+          "limit": $util.defaultIfNull(${ctx.args.limit}, 20),
+          "nextToken": $util.toJson($util.defaultIfNullOrBlank($ctx.args.nextToken, null))
+        }
+      ResponseMappingTemplate: |
+        #set($mappedItems = [])
+        #foreach($item in $ctx.result.items)
+          #set($mappedItem = $item)
+            #set($mappedItem.timestamp = $item.id.substring(4))  ## remove the "msg-" and return the resulting timestamp
+            $util.qr($mappedItems.add($mappedItem))
+        #end
+        {
+            "items": $util.toJson($mappedItems),
+            "nextToken": $util.toJson($util.defaultIfNullOrBlank($context.result.nextToken, null))
+        }
+
+  TailRDAppSyncResolverConversationDetailsParticipants:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: participants
+      TypeName: ConversationDetails
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceListUsersLambda.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "Invoke",
+          "payload": { "participants": $util.toJson($ctx.source.participants) }
+        }
+      ResponseMappingTemplate: $util.toJson($context.result)
+
+  TailRDAppSyncResolverUserConversations:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: conversations
+      TypeName: User
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Query",
+          "index": "UserConversation_Index",
+          "query" : {
+              ## Provide a query expression. **
+              "expression": "id = :id",
+              "expressionValues" : {
+                  ":id" : {
+                      "S" : "usr-${ctx.source.cognitoId}"
+                  }
+              }
+          },
+          ## Add 'limit' and 'nextToken' arguments to this field in your schema to implement pagination. **
+          "limit": $util.defaultIfNull(${ctx.args.limit}, 20),
+          "nextToken": $util.toJson($util.defaultIfNullOrBlank($ctx.args.nextToken, null))
+        }
+      ResponseMappingTemplate: |
+        {
+          "items": $util.toJson($ctx.result.items),
+          "nextToken": $util.toJson($util.defaultIfNullOrBlank($context.result.nextToken, null))
+        }
+
+  TailRDAppSyncResolverQueryGetUser:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: getUser
+      TypeName: Query
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceNone.Name
+      RequestMappingTemplate: |
+        #set($isDietitian = "#if($ctx.identity.claims.get('cognito:groups')[0] == 'Dietitian')true#{else}false#end")
+        {
+          "version": "2017-02-28",
+          "payload": {
+              "userId": "$ctx.identity.sub",
+              "username": "$ctx.identity.username",
+              "isDietitian": "$isDietitian"
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson({
+          "cognitoId": $ctx.result.userId,
+          "username": $ctx.result.username,
+          "isDietitian": $ctx.result.isDietitian
+        })
+
+  TailRDAppSyncResolverMutationCreateConversation:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: createConversation
+      TypeName: Mutation
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        #set( $convoInfo = {} )
+        #set( $convoInfo.createdBy = $ctx.identity.sub )
+        #set( $convoInfo.createdTime = $util.time.nowISO8601() )
+        #set( $convoInfo.lastActiveTime = $convoInfo.createdTime )
+        #set( $convoInfo.conversationId = $util.autoId() )
+        #set( $convoInfo.id = "convoInfo" )
+
+        #set( $mappedConvoInfo = $util.dynamodb.toMapValues($convoInfo) )
+        #set( $mappedConvoInfo.participants = $util.dynamodb.toStringSet(${ctx.args.input.participants}) )
+
+        #set($usrconvos = [])
+        $util.qr($usrconvos.add($mappedConvoInfo))
+        ## Should we make sure that the creator of the conversation is in the participants list?
+        #foreach($participantId in ${ctx.args.input.participants})
+          #set( $item = {} )
+            #set( $item['conversationId'] = $convoInfo.conversationId )
+            #set( $item['id'] = "usr-$participantId" )
+            #set( $item['LAT'] = $convoInfo.createdTime )
+            $util.qr($usrconvos.add($util.dynamodb.toMapValues($item)))
+        #end
+
+        {
+            "version" : "2018-05-29",
+            "operation" : "BatchPutItem",
+            "tables" : {
+                "TailRD_Message": $utils.toJson($usrconvos)
+            }
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+            $utils.appendError($ctx.error.message, $ctx.error.message)
+        #end
+
+        #set( $response = $ctx.result.data.TailRD_Message )
+        $utils.toJson($response[0])
+
+  TailRDAppSyncResolverMutationAddParticipant:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: addParticipant
+      TypeName: Mutation
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+              "conversationId": { "S" : "${ctx.args.input.conversationId}" },
+              "id": { "S" : "usr-${ctx.args.input.participant}" }
+          },
+          "condition": {
+            "expression": "not conversationId = :cid",
+            "expressionValues": {
+              ":cid": { "S" : "${ctx.args.input.conversationId}" }
+            }
+          },
+          "attributeValues": {
+            "LAT": { "S" : "${util.time.nowISO8601()}" }
+          }
+        }
+      ResponseMappingTemplate: $util.toJson($ctx.result)
+
+  TailRDAppSyncResolverMutationRemoveParticipant:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: removeParticipant
+      TypeName: Mutation
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "DeleteItem",
+          "key" : {
+              "conversationId" : { "S" : "${ctx.args.input.conversationId}" },
+              "id" : { "S" : "usr-${ctx.args.input.participant}" }
+          },
+          "condition": {
+            "expression": "conversationId = :cid and id = :id",
+            "expressionValues": {
+                ":cid" : { "S" : "${ctx.args.input.conversationId}" },
+                ":id": { "S" : "usr-${ctx.args.input.participant}" }
+            }
+          }
+        }
+      ResponseMappingTemplate: $util.toJson($ctx.result)
+
+  TailRDAppSyncResolverMutationSendMessage:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: TailRDAppSyncSchema
+    Properties:
+      FieldName: sendMessage
+      TypeName: Mutation
+      ApiId: !GetAtt TailRDAppSyncApi.ApiId
+      DataSourceName: !GetAtt TailRDAppSyncDataSourceMessageTable.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "PutItem",
+          "key" : {
+              "conversationId" : $util.dynamodb.toDynamoDBJson($ctx.args.input.conversationId),
+              "id" : $util.dynamodb.toDynamoDBJson("msg-$util.time.nowISO8601()")
+          },
+          #set( $attributes = $util.dynamodb.toMapValues($ctx.args.input) )
+          $util.qr($attributes.put("sender", { "S" : $ctx.identity.sub }))
+          "attributeValues": $util.toJson($attributes)
+        }
+      ResponseMappingTemplate: |
+        #set($resultWithTimestamp = $ctx.result)
+        #set($resultWithTimestamp.timestamp = $ctx.result.id.substring(4))  ## remove the "msg-" and return the resulting timestamp
+
+        $util.toJson($resultWithTimestamp)
