@@ -1,0 +1,5 @@
+sam-app/
+aws-venv/
+.vscode/
+
+.DS_Store
