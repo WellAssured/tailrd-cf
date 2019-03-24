@@ -1,0 +1,1 @@
+aws cloudformation deploy --capabilities CAPABILITY_NAMED_IAM --stack-name prod-tailrd-stack --template-file template.yml --parameter-overrides APIName=PROD-TailRD

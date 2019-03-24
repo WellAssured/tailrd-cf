@@ -1,0 +1,1 @@
+aws cloudformation describe-stack-events --stack-name test-tailrd-stack > test-out.txt

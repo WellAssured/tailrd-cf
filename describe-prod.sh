@@ -1,0 +1,1 @@
+aws cloudformation describe-stack-events --stack-name prod-tailrd-stack > prod-out.txt
